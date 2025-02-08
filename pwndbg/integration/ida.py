@@ -180,7 +180,8 @@ def can_connect() -> bool:
 def l2r(addr: int) -> int:
     exe = pwndbg.aglib.elf.exe()
     if not exe:
-        raise Exception("Can't find EXE base")
+        return addr & pwndbg.aglib.arch.ptrmask
+        # raise Exception("Can't find EXE base")
     result = (addr - int(exe.address) + base()) & pwndbg.aglib.arch.ptrmask
     return result
 
@@ -188,7 +189,8 @@ def l2r(addr: int) -> int:
 def r2l(addr: int) -> int:
     exe = pwndbg.aglib.elf.exe()
     if not exe:
-        raise Exception("Can't find EXE base")
+        return addr & pwndbg.aglib.arch.ptrmask
+        # raise Exception("Can't find EXE base")
     result = (addr - base() + int(exe.address)) & pwndbg.aglib.arch.ptrmask
     return result
 
@@ -283,7 +285,7 @@ def GetBptEA(i: int) -> int:
     return _ida.get_bpt_ea(i)  # type: ignore[return-value]
 
 
-_breakpoints: List[gdb.Breakpoint] = []
+_breakpoints: List[(gdb.Breakpoint, int)] = []
 
 
 @pwndbg.dbg.event_handler(EventType.CONTINUE)
@@ -291,22 +293,25 @@ _breakpoints: List[gdb.Breakpoint] = []
 @withIDA
 def UpdateBreakpoints() -> None:
     # XXX: Remove breakpoints from IDA when the user removes them.
-    current = {eval(b.location.lstrip("*")) for b in _breakpoints}
+    current = {a for (b,a) in _breakpoints}
     want = set(GetBreakpoints())
 
+    print(current)
+    print(want)
+
     for addr in current - want:
-        for bp in _breakpoints:
-            if int(bp.location.lstrip("*"), 0) == addr:
+        for (bp,a) in _breakpoints:
+            if a == addr:
                 bp.delete()
                 break
-        _breakpoints.remove(bp)
+        _breakpoints.remove((bp,a))
 
     for addr in want - current:
         if not pwndbg.aglib.memory.peek(addr):
             continue
 
         bp = gdb.Breakpoint("*" + hex(int(addr)))
-        _breakpoints.append(bp)
+        _breakpoints.append((bp, int(addr)))
 
 
 @withIDA
@@ -549,6 +554,10 @@ class IdaProvider(pwndbg.integration.IntegrationProvider):
         exe = pwndbg.aglib.elf.exe()
         if exe:
             exe_map = pwndbg.aglib.vmmap.find(exe.address)
+            if exe_map and addr in exe_map:
+                return Name(addr) or GetFuncOffset(addr) or None
+        else:
+            exe_map = pwndbg.aglib.vmmap.find(pwndbg.aglib.elf.entry())
             if exe_map and addr in exe_map:
                 return Name(addr) or GetFuncOffset(addr) or None
         return None
