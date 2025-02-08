@@ -10,20 +10,7 @@ from xmlrpc.server import SimpleXMLRPCServer
 import idaapi
 import idc
 
-# Wait for any processing to get done
-idaapi.auto_wait()
-
-# On Windows with NTFS filesystem a filepath with ':'
-# is treated as NTFS ADS (Alternative Data Stream)
-# and so saving file with such name fails
-dt = datetime.datetime.now().isoformat().replace(":", "-")
-
-# Save the database so nothing gets lost.
-idc.save_database(idc.get_idb_path() + "." + dt)
-
-
 DEBUG_MARSHALLING = False
-
 
 def create_marshaller(use_format=None, just_to_str=False):
     assert (
@@ -44,52 +31,9 @@ def create_marshaller(use_format=None, just_to_str=False):
     return wrapper
 
 
-xmlclient.Marshaller.dispatch[type(1 << 63)] = create_marshaller("<value><i8>%d</i8></value>")
-xmlclient.Marshaller.dispatch[int] = create_marshaller("<value><i8>%d</i8></value>")
-xmlclient.Marshaller.dispatch[idaapi.cfuncptr_t] = create_marshaller(just_to_str=True)
-
-host = "127.0.0.1"
-port = 31337
-
-mutex = threading.Condition()
 
 
-def wrap(f):
-    def wrapper(*a, **kw):
-        rv = []
-        error = []
-
-        def work():
-            try:
-                result = f(*a, **kw)
-                rv.append(result)
-            except Exception as e:
-                error.append(e)
-
-        with mutex:
-            flags = idaapi.MFF_WRITE
-            if f == idc.set_color:
-                flags |= idaapi.MFF_NOWAIT
-                rv.append(None)
-            idaapi.execute_sync(work, flags)
-
-        if error:
-            msg = f"Failed on calling {f.__module__}.{f.__name__} with args: {a}, kwargs: {kw}\nException: {str(error[0])}"
-            print("[!!!] ERROR:", msg)
-            raise error[0]
-
-        return rv[0]
-
-    return wrapper
-
-
-def register_module(module):
-    for name, function in module.__dict__.items():
-        if hasattr(function, "__call__"):
-            server.register_function(wrap(function), name)
-
-
-def decompile(addr):
+def decompile_cust(addr):
     """
     Function that overwrites `idaapi.decompile` for xmlrpc so that instead
     of throwing an exception on `idaapi.DecompilationFailure` it just returns `None`.
@@ -129,7 +73,7 @@ def get_decompile_coord_by_ea(cfunc, addr):
 
 
 def decompile_context(addr, context_lines):
-    cfunc = decompile(addr)
+    cfunc = decompile_cust(addr)
     if cfunc is None:
         return None
     y = get_decompile_coord_by_ea(cfunc, addr)
@@ -154,26 +98,82 @@ def versions():
         "hexrays": idaapi.get_hexrays_version() if idaapi.init_hexrays_plugin() else None,
     }
 
+class plugin(idaapi.plugin_t):
+    flags = idaapi.PLUGIN_KEEP
+    wanted_name = "PWNDBG integration"
 
-server = SimpleXMLRPCServer((host, port), logRequests=False, allow_none=True)
-register_module(idaapi)
-register_module(
-    idc
-)  # prioritize idc functions over above (e.g. idc.get_next_seg/ida_segment.get_next_seg)
+    def init(self):
+        # Wait for any processing to get done
+        idaapi.auto_wait()
 
-server.register_function(lambda a: eval(a, globals(), locals()), "eval")
-server.register_function(wrap(decompile))  # overwrites idaapi/ida_hexrays.decompile
-server.register_function(wrap(decompile_context), "decompile_context")  # support context decompile
-server.register_function(wrap(versions))
-server.register_introspection_functions()
+        # On Windows with NTFS filesystem a filepath with ':'
+        # is treated as NTFS ADS (Alternative Data Stream)
+        # and so saving file with such name fails
+        dt = datetime.datetime.now().isoformat().replace(":", "-")
 
-print(f"IDA Pro xmlrpc hosted on http://{host}:{port}")
-print("Call `shutdown()` to shutdown the IDA Pro xmlrpc server.")
+        # Save the database so nothing gets lost.
+        idc.save_database(idc.get_idb_path() + "." + dt)
 
-thread = threading.Thread(target=server.serve_forever)
-thread.daemon = True
-thread.start()
+        xmlclient.Marshaller.dispatch[type(1 << 63)] = create_marshaller("<value><i8>%d</i8></value>")
+        xmlclient.Marshaller.dispatch[int] = create_marshaller("<value><i8>%d</i8></value>")
+        xmlclient.Marshaller.dispatch[idaapi.cfuncptr_t] = create_marshaller(just_to_str=True)
 
+        host = "127.0.0.1"
+        port = 31337
+
+        self.mutex = threading.Condition()
+
+        self.server = SimpleXMLRPCServer((host, port), logRequests=False, allow_none=True)
+        self.register_module(idaapi)
+        self.register_module(
+            idc
+        )  # prioritize idc functions over above (e.g. idc.get_next_seg/ida_segment.get_next_seg)
+
+        self.server.register_function(lambda a: eval(a, globals(), locals()), "eval")
+        self.server.register_function(self.wrap(decompile_cust), "decompile")  # overwrites idaapi/ida_hexrays.decompile
+        self.server.register_function(self.wrap(decompile_context), "decompile_context")  # support context decompile
+        self.server.register_function(self.wrap(versions), "versions")
+        self.server.register_introspection_functions()
+
+        print(f"IDA Pro xmlrpc hosted on http://{host}:{port}")
+        print("Call `shutdown()` to shutdown the IDA Pro xmlrpc server.")
+
+        thread = threading.Thread(target=self.server.serve_forever)
+        thread.daemon = True
+        thread.start()
+        return idaapi.PLUGIN_KEEP
+
+    def wrap(self, f):
+        def wrapper(*a, **kw):
+            rv = []
+            error = []
+
+            def work():
+                try:
+                    result = f(*a, **kw)
+                    rv.append(result)
+                except Exception as e:
+                    error.append(e)
+
+            with self.mutex:
+                flags = idaapi.MFF_WRITE
+                if f == idc.set_color:
+                    flags |= idaapi.MFF_NOWAIT
+                    rv.append(None)
+                idaapi.execute_sync(work, flags)
+
+            if error:
+                msg = f"Failed on calling {f.__module__}.{f.__name__} with args: {a}, kwargs: {kw}\nException: {str(error[0])}"
+                print("[!!!] ERROR:", msg)
+                raise error[0]
+
+            return rv[0]
+        return wrapper
+
+    def register_module(self, module):
+        for name, function in module.__dict__.items():
+            if hasattr(function, "__call__"):
+                self.server.register_function(self.wrap(function), name)
 
 def shutdown():
     global server
@@ -182,3 +182,6 @@ def shutdown():
     server.server_close()
     del server
     del thread
+
+def PLUGIN_ENTRY():
+    return plugin()
