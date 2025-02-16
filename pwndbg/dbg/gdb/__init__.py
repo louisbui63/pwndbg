@@ -44,6 +44,7 @@ gdb_architecture_name_fixup_list = (
     "i8086",
     "aarch64",
     "mips",
+    "rs6000",
     "powerpc",
     "sparc",
     "arm",
@@ -163,7 +164,7 @@ class GDBFrame(pwndbg.dbg_mod.Frame):
 
     @override
     def reg_write(self, name: str, val: int) -> bool:
-        if name not in pwndbg.aglib.regs.all:
+        if name not in pwndbg.aglib.regs:
             return False
 
         with selection(self.inner, lambda: gdb.selected_frame(), lambda f: f.select()):
@@ -597,10 +598,14 @@ class GDBProcess(pwndbg.dbg_mod.Process):
 
         if pwndbg.aglib.file.is_vfile_qemu_user_bug():
             with open(local_path, "wb") as fp:
-                for data in pwndbg.aglib.file.vfile_readfile(remote_path):
-                    fp.write(data)
-            return
-
+                try:
+                    for data in pwndbg.aglib.file.vfile_readfile(remote_path):
+                        fp.write(data)
+                    return
+                except OSError as e:
+                    raise pwndbg.dbg_mod.Error(
+                        "Could not download remote file %r:\nError: %s" % (remote_path, str(e))
+                    )
         try:
             error = gdb.execute(f'remote get "{remote_path}" "{local_path}"', to_string=True)
         except gdb.error as e:
@@ -726,6 +731,9 @@ class GDBProcess(pwndbg.dbg_mod.Process):
                     match = "rv64"
                 elif match == "iwmmxt" or match == "iwmmxt2" or match == "xscale":
                     match = "arm"
+                elif match == "rs6000":
+                    # The RS/6000 architecture is compatible with the PowerPC common
+                    match = "powerpc"
                 return GDBArch(endian, match, ptrsize)  # type: ignore[arg-type]
 
         if not_exactly_arch:

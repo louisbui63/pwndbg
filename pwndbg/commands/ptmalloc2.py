@@ -292,7 +292,7 @@ def arena(addr: int | None = None) -> None:
             )
         )
 
-    print(arena._gdbValue)  # Breaks encapsulation, find a better way.
+    print(arena._gdbValue.value_to_human_readable())  # Breaks encapsulation, find a better way.
 
 
 parser = argparse.ArgumentParser(description="List this process's arenas.")
@@ -382,13 +382,13 @@ def tcache(addr: int | None = None) -> None:
     if tcache:
         print(
             message.notice(
-                f"tcache is pointing to: {message.hint(hex(tcache.address))} for thread {message.hint(tid)}"
+                f"tcache is pointing to: {message.hint(hex(int(tcache.address)))} for thread {message.hint(tid)}"
             )
         )
     else:
         print_no_tcache_bins_found_error(tid)
     if tcache:
-        print(tcache)
+        print(tcache.value_to_human_readable())
 
 
 parser = argparse.ArgumentParser(description="Print the mp_ struct's contents.")
@@ -1004,6 +1004,15 @@ def vis_heap_chunks(
     allocator = pwndbg.aglib.heap.current
     assert isinstance(allocator, GlibcMemoryAllocator)
 
+    # Used to determine whether to show command hint
+    nothing_supplied = (
+        addr is None
+        and count == pwndbg.config.default_visualize_chunk_number
+        and not beyond_top
+        and not no_truncate
+        and not all_chunks
+    )
+
     # If the first argument (count) is big enough (and address isn't provided) interpret it as an address
     if addr is None and count is not None and count > 0x1000:
         addr = count
@@ -1100,6 +1109,7 @@ def vis_heap_chunks(
     cursor = cursor_backup
     chunk = Chunk(cursor)
 
+    reached_top = False
     has_huge_chunk = False
     # round up to align with 4*ptr_size and get half
     half_max_size = (
@@ -1144,6 +1154,7 @@ def vis_heap_chunks(
             labels.extend(bin_labels_map.get(cursor, []))
             if arena is not None and cursor == arena.top:
                 labels.append("Top chunk")
+                reached_top = True
 
             asc += bin_ascii(data)
             if printed % 2 == 0:
@@ -1169,6 +1180,9 @@ def vis_heap_chunks(
                 "You can try `set max-visualize-chunk-size 0x500` and re-run this command.\n"
             )
         )
+
+    if not reached_top and nothing_supplied:
+        print(message.hint("Not all chunks were shown, see `vis --help` for more information."))
 
 
 VALID_CHARS = list(map(ord, set(printable) - set("\t\r\n\x0c\x0b")))
